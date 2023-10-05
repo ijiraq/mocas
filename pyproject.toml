@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+
+[tool.setuptools_scm]
+version_file = "src/mocas/__version__.py"
+
+[project]
+name = "mocas"
+authors = [{ name = "JJ Kavelaars", email = "JJ.Kavelaars@nrc-cnrc.gc.ca" }]
+description = "Search for SSO observations in the CADC CAOM2 "
+readme = "README.md"
+keywords = ["astronomy", "database", "STC"]
+license = { text= "GPLv3 or later" }
+dependencies = [
+    "astropy",
+    "numpy",
+    "mp_ephem",
+    "cadcutils",
+    "pyvo"
+]
+classifiers = ["Programming Language :: Python :: 3"]
+dynamic = ["version"]
