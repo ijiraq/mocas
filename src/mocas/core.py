@@ -43,7 +43,7 @@ def query_cadc_archive_against_votable(query: str, votable_file: TAPUploadVOTabl
         CADCArchiveTapClient().query(query=query,
                                      output_file=result,
                                      tmptable=f"tmptable:{f.name}",
-                                     timeout=10)
+                                     timeout=60)
     result.seek(0)
     return Table.read(result, format='votable')
 
@@ -178,37 +178,4 @@ def search(ast_file: str, start_date: Time, end_date: Time):
                              orbit)
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Search the CADC CFHT MegaPrime archive for observations of '
-                                                 'a moving object in a time interval.')
-    parser.add_argument('ast_file', type=str, help='The path to the ast file containing '
-                                                   'the observations of the ')
-    parser.add_argument('start_date', type=str, help='The start date of the time interval to search')
-    parser.add_argument('end_date', type=str, help='The end date of the time interval to search')
-    parser.add_argument('--output', type=str, help='The path to the output file')
-    parser.add_argument('--log-level', type=str, help='The log level to use',
-                        default='INFO',
-                        choices=['DEBUG',
-                                 'INFO',
-                                 'WARNING',
-                                 'ERROR',
-                                 'CRITICAL'])
-    args = parser.parse_args()
-    warnings.simplefilter('ignore', category=UserWarning)
-    logging.basicConfig(level=getattr(logging, args.log_level.upper()),
-                        format='%(asctime)s %(levelname)s %(message)s')
-    start_date = Time(args.start_date)
-    end_date = Time(args.end_date)
-    ast_file = args.ast_file
-    start_time = time.time()
-    logging.info(f"Searching for observations along path {ast_file}")
-    search(ast_file, start_date, end_date).write(f"{ast_file.rstrip('ast')}tsv",
-                                                 format='ascii',
-                                                 delimiter='\t',
-                                                 overwrite=True)
-    end_time = time.time()
-    logging.info(f"Time taken: {end_time - start_time}")
 
-
-if __name__ == "__main__":
-    main()
