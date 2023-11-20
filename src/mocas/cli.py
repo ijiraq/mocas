@@ -5,6 +5,8 @@ import argparse
 import logging
 import os.path
 import warnings
+
+import vos
 from astropy.time import Time
 from .core import search
 
@@ -27,6 +29,8 @@ def main():
                               'See https://docs.astropy.org/en/stable/io/unified.html#built-in-readers-writers'),
                         default='ascii.csv')
     parser.add_argument('--delimiter', type=str, help='The output column delimiter', default='\t')
+    parser.add_argument('--dblist', help="Text file containing list of observation ids of interest.",
+                        default=None)
     parser.add_argument('--log-level', type=str, help='The log level to use',
                         default='ERROR',
                         choices=['DEBUG',
@@ -41,8 +45,13 @@ def main():
     start_date = Time(args.start_date)
     end_date = Time(args.end_date)
     ast_file = args.ast_file
+    observation_id_list = None
+    if args.dblist is not None:
+        observation_id_list = [observation_id.strip() for observation_id in open(args.dblist).readlines()]
 
-    search(ast_file, start_date, end_date).write(args.output,
-                                                 format='ascii',
-                                                 delimiter='\t',
-                                                 overwrite=True)
+    result_table = search(ast_file, start_date, end_date, observation_id_list)
+    result_table.sort('MJD')
+    result_table.write(args.output,
+                       format='ascii',
+                       delimiter='\t',
+                       overwrite=True)

@@ -1,20 +1,16 @@
 """
 Do a search of the CADC CAOM database for a moving object.
 """
-import argparse
-import glob
+import asyncio
 import logging
 import os
 import time
-import warnings
 from io import BytesIO
 from tempfile import NamedTemporaryFile
-
 from astropy import wcs
-from astropy.table import Table, unique
+from astropy.table import Table, unique, vstack
 from astropy.time import Time
 from mp_ephem import BKOrbit
-
 from .cadc_archive_tap_client import CADCArchiveTapClient
 from .ephemeris_builder import SearchBoundsGenerator
 from .votable_file import TAPUploadVOTableFile
@@ -29,23 +25,54 @@ def get_orbit_from_ast_file(ast_file) -> BKOrbit:  # noqa: N802
     return BKOrbit(None, ast_filename=ast_file)
 
 
-def query_cadc_archive_against_votable(query: str, votable_file: TAPUploadVOTableFile) -> Table:
+async def query_cadc_archive_against_votable(query: str,
+                                             votable_file: TAPUploadVOTableFile,
+                                             query_name='query',
+                                             chunk_size=320) -> Table:
     """
     Run QUERY against CADC ARCHIVE TAP service using the TAPUploadVOTableFile as the tmptable.
     :param query:
     :param votable_file:
+    :param query_name: string to use in logging
+    :param chunk_size: number of rows to send in each query
     :return:
     """
-    with NamedTemporaryFile() as f:
+    arc_length = len(votable_file)
+    logging.info(f"{query_name} query has {arc_length} rows")
+    chunks = arc_length//chunk_size + 1
+    logging.info(f"Breaking into {chunks} asynchronous queries")
+    vo_tables = []
+    for chunk in range(chunks):
+        vo_tables.append(TAPUploadVOTableFile(votable_file.get_first_table().array[chunk:chunk + chunk_size],
+                                              votable_file.field_definitions))
+    logging.info(f"Got {len(vo_tables)} sets")
+    return vstack(await asyncio.gather(*[async_query_cadc_archive_against_votable(query, vo_table)
+                                         for vo_table in vo_tables]))
+
+
+async def async_query_cadc_archive_against_votable(query: str, votable_file: TAPUploadVOTableFile) -> Table:
+    """
+    """
+    client = CADCArchiveTapClient()
+    logging.info(f"Querying against votable of length: {len(votable_file)}")
+    with NamedTemporaryFile(delete=False) as f:
         votable_file.to_xml(f)
-        f.flush()
-        result = BytesIO()
-        CADCArchiveTapClient().query(query=query,
-                                     output_file=result,
-                                     tmptable=f"tmptable:{f.name}",
-                                     timeout=60)
-    result.seek(0)
-    return Table.read(result, format='votable')
+
+    with NamedTemporaryFile() as result:
+        start_of_query = time.time()
+        logging.info(f"Starting query")
+        await asyncio.to_thread(client.query,
+                                query=query,
+                                output_file=result.name,
+                                tmptable=f"tmptable:{f.name}",
+                                timeout=60)
+        end_of_query = time.time()
+        logging.info(f"Query took {end_of_query - start_of_query} seconds")
+        result.seek(0)
+        result_table = Table.read(result.name, format='votable')
+    os.remove(f.name)
+    logging.debug(f"{result_table}")
+    return result_table
 
 
 def search_along_arc(votable_file: TAPUploadVOTableFile,
@@ -60,29 +87,33 @@ def search_along_arc(votable_file: TAPUploadVOTableFile,
     :return:
     """
     _search_along_ephemeris_query = (
-        "SELECT observationID, target_name, (time_bounds_lower+time_bounds_upper)/2 as mid_mjd "
-        "FROM caom2.Plane AS p JOIN caom2.Observation AS o ON p.obsID=o.obsID "
+        "SELECT "
+        " planeID "
+        "FROM caom2.Plane AS p "
         ", tap_upload.tmptable AS arc "
-        "WHERE o.instrument_name = '{}' "
-        "AND o.collection = '{}' "
+        "WHERE "
+        "p.calibrationLevel = 2 "
         "AND INTERSECTS( arc.time_interval, p.time_bounds_samples ) = 1  "
         "AND INTERSECTS( arc.pos_circle, p.position_bounds) = 1")
-    result = query_cadc_archive_against_votable(
+    result = asyncio.run(query_cadc_archive_against_votable(
         _search_along_ephemeris_query.format(instrument, collection),
-        votable_file)
+        votable_file, query_name='search_along_ephemeris'))
+    logging.debug(f"Found {len(result)} observation planes overlapping the ephemeris")
+    logging.debug(f"{result}")
     if len(result) > 0:
-        result = unique(result, keys='observationID')
+        result = unique(result, keys='planeID')
     return result
 
 
-def get_observation_details(observation_ids: list) -> Table:
+def get_artifact_wcs(plane_ids: list) -> Table:
     """
     Get the WCS of a set of observations
-    :param observation_ids:
+    :param plane_ids:
     :return:
     """
     _observation_details_query = ("SELECT "
-                                  "o.observationID, "
+                                  "o.observationID as observation_id,"
+                                  "p.productID as Image, "
                                   "o.target_name as Image_Target, "
                                   "p.energy_bandpassName as Filter, "
                                   "(p.time_bounds_upper + p.time_bounds_lower)/2 as mid_mjd, "
@@ -103,38 +134,52 @@ def get_observation_details(observation_ids: list) -> Table:
                                   "position_axis_function_cd12 as CD1_2, "
                                   "position_axis_function_cd21 as CD2_1, "
                                   "position_axis_function_cd22 as CD2_2 "
-                                  "FROM "
-                                  "caom2.Observation AS o "
-                                  "JOIN caom2.Plane as p ON p.obsID=o.obsID "
+                                  "FROM caom2.Plane AS p "
+                                  "JOIN caom2.Observation AS o ON o.obsID=p.obsID "
                                   "JOIN caom2.Artifact AS a ON p.planeID=a.planeID "
                                   "JOIN caom2.Part AS pa ON a.artifactID=pa.artifactID "
                                   "JOIN caom2.Chunk AS c ON pa.partID=c.partID "
                                   ", tap_upload.tmptable AS obs "
-                                  "WHERE o.observationID = obs.observationID AND p.calibrationLevel = 2 "
+                                  "WHERE p.planeID = obs.eph_planeID "
                                   "AND a.productType = 'science' ")
-    field_definitions = {'observationID': {'datatype': 'char', 'arraysize': '*'}}
-    observation_id_votable_file = TAPUploadVOTableFile(observation_ids, field_definitions)
-    return query_cadc_archive_against_votable(_observation_details_query, observation_id_votable_file)
+    # obsID_list = "("+",".join(["'"+plane_id+"'" for plane_id in plane_ids])+")"
+    # _observation_details_query = _observation_details_query.format(obsID_list)
+    field_definitions = {'eph_planeID': {'datatype': 'char', 'arraysize': '36', 'xtype': 'uuid'}}
+    observation_id_votable_file = TAPUploadVOTableFile(plane_ids, field_definitions)
+    # return query_cadc_archive(_observation_details_query)
+    return asyncio.run(query_cadc_archive_against_votable(_observation_details_query, observation_id_votable_file,
+                                                          query_name='observation_details'))
 
 
-def filter_for_artifacts_containing_arc(artifacts: Table, orbit: BKOrbit) -> Table:
+def filter_for_artifacts_containing_arc(artifacts_wcs: Table, orbit: BKOrbit, dblist: list) -> Table:
     """
     Filter through the list of observations (using the wcs of each artifact) to determine which contain the arc.
 
-    :param artifacts:
+    :param artifacts_wcs:
     :param orbit:
+    :param dblist:  a list of observation_id values in the dbimages directory.
     :return:
     """
     result = []
-    for artifact in artifacts:
-        orbit.predict(Time(artifact['mid_mjd'], format='mjd'))
-        result.append(wcs.WCS(artifact).footprint_contains(orbit.coordinate))
-    return artifacts[result]
+    for artifact_wcs in artifacts_wcs:
+        result.append(False)
+        if dblist is not None and artifact_wcs['observation_id'] not in dblist:
+            logging.warning(f"Skipping {artifact_wcs['observation_id']} as not in observation id list.")
+            continue
+        try:
+            orbit.predict(Time(artifact_wcs['mid_mjd'], format='mjd'))
+            this_artifact_wcs = wcs.WCS(artifact_wcs)
+            x, y = this_artifact_wcs.wcs_world2pix(orbit.coordinate.ra.degree, orbit.coordinate.dec.degree, 1)
+            if 32 < x < 2080 and 0 < y < 4612:
+                result[-1] = True
+        except Exception as e:
+            logging.warning(f"Failed to build a wcs using {artifact_wcs}: {e}")
+    return artifacts_wcs[result]
 
 
 ssois_column_names = ['Image', 'Filter', 'Image_Target',
                       'Ext', 'X', 'Y', 'MJD',
-                      'Object_RA', 'Object_Dec', 'dra', 'ddec']
+                      'Object_RA', 'Object_Dec', 'dra', 'ddec', 'PA']
 
 
 def build_ssois_table(artifacts: Table, orbit: BKOrbit) -> Table:
@@ -148,7 +193,7 @@ def build_ssois_table(artifacts: Table, orbit: BKOrbit) -> Table:
     for artifact in artifacts:
         orbit.predict(Time(artifact['mid_mjd'], format='mjd'))
         x, y = wcs.WCS(artifact).wcs_world2pix(orbit.coordinate.ra.degree, orbit.coordinate.dec.degree, 1)
-        ssois_columns['Image'].append(f"{artifact['observationID']}p")
+        ssois_columns['Image'].append(f"{artifact['Image']}")
         ssois_columns['Filter'].append(artifact['Filter'])
         ssois_columns['Image_Target'].append(artifact['Image_Target'])
         ssois_columns['Ext'].append(artifact['EXTNAME'])
@@ -159,10 +204,11 @@ def build_ssois_table(artifacts: Table, orbit: BKOrbit) -> Table:
         ssois_columns['Object_Dec'].append(orbit.coordinate.dec.degree)
         ssois_columns['dra'].append(orbit.dra.value)
         ssois_columns['ddec'].append(orbit.ddec.value)
+        ssois_columns['PA'].append(orbit.pa.value)
     return Table(ssois_columns)
 
 
-def search(ast_file: str, start_date: Time, end_date: Time):
+def search(ast_file: str, start_date: Time, end_date: Time, observation_ids: list = None):
     """
     Search the CADC archive for observations of a moving object in a time interval.
 
@@ -173,9 +219,8 @@ def search(ast_file: str, start_date: Time, end_date: Time):
     """
     orbit = get_orbit_from_ast_file(ast_file)
     observations = search_along_arc(SearchBoundsGenerator(orbit, start_date, end_date).votable)
-    artifact_wcs = get_observation_details(list(observations["observationID"]))
-    return build_ssois_table(filter_for_artifacts_containing_arc(artifact_wcs, orbit),
+    logging.info(f"Found {len(observations)} possible observations, checking if on detector.")
+    artifact_wcs = get_artifact_wcs(list(observations["planeID"]))
+    logging.info(f"Found {len(artifact_wcs)} extensions to check.")
+    return build_ssois_table(filter_for_artifacts_containing_arc(artifact_wcs, orbit, observation_ids),
                              orbit)
-
-
-

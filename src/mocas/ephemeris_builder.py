@@ -1,8 +1,13 @@
+import logging
+import time
+
 from astropy.coordinates import SkyCoord
 import numpy
 from astropy import units
 from astropy.time import Time
 from mp_ephem import BKOrbit
+from matplotlib import pyplot as plt
+from matplotlib.patches import Circle
 
 from .votable_file import TAPUploadVOTableFile
 
@@ -71,15 +76,35 @@ class SearchBoundsGenerator(object):
         Return a list of interval rows for the ephemeris.
         :return:
         """
+        logging.info("Generating ephemeris for {} from {} to {} with interval size {} and time step {}.".format(
+            self.orbit.name, self.start_date, self.end_date, self.interval_size, self.time_step))
+        start_time = time.perf_counter()
         rows = []
         self.interval_start_date = self.start_date
         while self.interval_start_date < self.end_date:
-            self.interval_end_date = self.interval_start_date + self.interval_size
+            self.interval_start_date = max(self.start_date, self.interval_start_date - 1*self.time_step)
+            self.interval_end_date = min(self.end_date, self.interval_start_date + self.interval_size)
             rows.append(((self.interval_start_date.mjd,
                           self.interval_end_date.mjd),
                          self._circle_region))
             self.interval_start_date = self.interval_end_date
+        logging.info("Generating ephemeris of {} intervals took {} seconds".format(self.orbit.name,
+                                                                                   len(rows),
+                                                                                   time.perf_counter() - start_time))
+        self.plot(rows)
         return rows
+
+    def plot(self, rows):
+        ax = plt.gca()
+        ra = []
+        dec = []
+        for row in rows:
+            ra.append(row[1][0])
+            dec.append(row[1][1])
+            ax.add_patch(Circle((row[1][0], row[1][1]), fill=False,
+                                radius=row[1][2]/numpy.cos(numpy.radians(row[1][1]))))
+        if logging.getLogger().level < logging.ERROR:
+            plt.show()
 
     @property
     def _circle_region(self):
@@ -110,14 +135,19 @@ class SearchBoundsGenerator(object):
 
         _coords = []
         box_corners = numpy.array([[-1, -1], [-1, 1], [1, 1], [1, -1]])
-        for current_time in numpy.arange(self.interval_start_date.jd, self.interval_end_date.jd, self.time_step.to(units.day).value):
+        for current_time in numpy.arange(self.interval_start_date.jd,
+                                         self.interval_end_date.jd,
+                                         self.time_step.to(units.day).value):
             self.orbit.predict(current_time)
             uncertainty_box_offsets = (box_corners *
                                        (self.orbit.dra.value, self.orbit.ddec.value) *
                                        (self.orbit.dra.unit, self.orbit.ddec.unit)).T
-            _coords.extend(self.orbit.coordinate.spherical_offsets_by(uncertainty_box_offsets[0],
-                                                                      uncertainty_box_offsets[1]))
+            bb = self.orbit.coordinate.spherical_offsets_by(uncertainty_box_offsets[0],
+                                                            uncertainty_box_offsets[1])
+            _coords.extend(bb)
         self._coords = SkyCoord(_coords)
+        logging.info(f"{self._coords}")
+        plt.plot(self._coords.ra.degree, self._coords.dec.degree, 's')
         return self._coords
 
     @property

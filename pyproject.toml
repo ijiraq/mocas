@@ -7,7 +7,7 @@ version_file = "src/mocas/__version__.py"
 [project]
 name = "mocas"
 authors = [{ name = "JJ Kavelaars", email = "JJ.Kavelaars@nrc-cnrc.gc.ca" }]
-description = "Search for SSO observations in the CADC CAOM2 "
+description = "Search for SSO observations in the CADC CAOM2 catalog"
 readme = "README.md"
 keywords = ["astronomy", "database", "STC"]
 license = { text= "GPLv3 or later" }

@@ -3,4 +3,6 @@ venv
 .idea
 .DS_Store
 __pycache__
-```
+__version__.py
+build
+*.egg-info*

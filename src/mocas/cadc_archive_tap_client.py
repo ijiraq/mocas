@@ -1,3 +1,6 @@
+from io import BytesIO
+
+from astropy.table import Table
 from cadctap import CadcTapClient
 import pyvo
 import cadcutils
@@ -18,3 +21,13 @@ class CADCArchiveTapClient(CadcTapClient):
     def cadc_archive_resource_id(self) -> str:
         return pyvo.registry.search(keywords=["CADC"],
                                     servicetype="tap")["CADC TAP"].ivoid
+
+    def get_table(self, query: str) -> pyvo.dal.tap.TAPResults:
+        """
+        Get a table from the CADC Archive TAP service.
+        """
+        with BytesIO() as f:
+            self.query(query, output_file=f)
+            f.seek(0)
+            table = Table.read(f, format='votable')
+        return table

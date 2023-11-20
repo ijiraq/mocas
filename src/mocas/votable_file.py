@@ -12,6 +12,7 @@ class TAPUploadVOTableFile(VOTableFile):
         :return:
         """
         super().__init__(**kwargs)
+        self.field_definitions = field_definitions
 
         # ...with one resource...
         resource = Resource()
@@ -29,4 +30,5 @@ class TAPUploadVOTableFile(VOTableFile):
         for i in range(len(rows)):
             table.array[i] = rows[i]
 
-
+    def __len__(self):
+        return len(self.resources[0].tables[0].array)
