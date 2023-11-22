@@ -1,13 +1,13 @@
 import logging
 import time
-
+from spherical_geometry.polygon import SphericalPolygon
 from astropy.coordinates import SkyCoord
 import numpy
 from astropy import units
 from astropy.time import Time
 from mp_ephem import BKOrbit
 from matplotlib import pyplot as plt
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Polygon
 
 from .votable_file import TAPUploadVOTableFile
 
@@ -23,7 +23,10 @@ class SearchBoundsGenerator(object):
 
     """
 
-    def __init__(self, orbit, start_date:Time, end_date:Time, time_step=1 * units.day, interval_size=30 * units.day):
+    def __init__(self, orbit,
+                 start_date: Time, end_date: Time,
+                 time_step=1 * units.day,
+                 interval_size=30 * units.day):
         """
         Returns a time interval and an IVOA CIRCLE that is the union of sky locations visited by
         the SSO during that time interval.  The CIRCLE is centred on the mean coordinate of the sky path of the SSO
@@ -48,7 +51,7 @@ class SearchBoundsGenerator(object):
     @property
     def field_definitions(self) -> dict:
         return {'time_interval': {'datatype': 'double', 'arraysize': '2', 'xtype': 'interval'},
-                'pos_circle': {'datatype': 'double', 'arraysize': '3', 'xtype': 'circle'}}
+                'polygon': {'datatype': 'double', 'arraysize': '*', 'xtype': 'polygon'}}
 
     @property
     def interval_start_date(self) -> Time:
@@ -86,7 +89,7 @@ class SearchBoundsGenerator(object):
             self.interval_end_date = min(self.end_date, self.interval_start_date + self.interval_size)
             rows.append(((self.interval_start_date.mjd,
                           self.interval_end_date.mjd),
-                         self._circle_region))
+                         self._polygon_region))
             self.interval_start_date = self.interval_end_date
         logging.info("Generating ephemeris of {} intervals took {} seconds".format(self.orbit.name,
                                                                                    len(rows),
@@ -96,15 +99,22 @@ class SearchBoundsGenerator(object):
 
     def plot(self, rows):
         ax = plt.gca()
-        ra = []
-        dec = []
         for row in rows:
-            ra.append(row[1][0])
-            dec.append(row[1][1])
-            ax.add_patch(Circle((row[1][0], row[1][1]), fill=False,
-                                radius=row[1][2]/numpy.cos(numpy.radians(row[1][1]))))
+            ax.add_patch(Polygon(row[1][:], fill=False, alpha=0.5))
         if logging.getLogger().level < logging.ERROR:
             plt.show()
+
+    @property
+    def _polygon_region(self):
+        """
+        Return a list of RA/Dec pairs that define the polygon region of the ephemeris.
+        """
+        points = [[p.x.value, p.y.value, p.z.value] for p in self._ephemeris_coordinates.represent_as('cartesian')]
+        polygon = SphericalPolygon.convex_hull(points)
+        c = numpy.array([x for x in polygon.to_radec()][0]).T
+        c = c.round(8)
+        return c[0:-1]
+
 
     @property
     def _circle_region(self):
@@ -135,18 +145,26 @@ class SearchBoundsGenerator(object):
 
         _coords = []
         box_corners = numpy.array([[-1, -1], [-1, 1], [1, 1], [1, -1]])
+        previous_coord = None
         for current_time in numpy.arange(self.interval_start_date.jd,
                                          self.interval_end_date.jd,
                                          self.time_step.to(units.day).value):
             self.orbit.predict(current_time)
+            if previous_coord is not None:
+                min_dra = numpy.fabs((previous_coord.ra-self.orbit.coordinate.ra).to(self.orbit.dra.unit).value)
+                min_ddec = numpy.fabs((previous_coord.dec - self.orbit.coordinate.dec).to(self.orbit.ddec.unit).value)
+            else:
+                min_dra = (1.0 * units.arcsec).to(self.orbit.dra.unit).value
+                min_ddec = (1.0 * units.arcsec).to(self.orbit.ddec.unit).value
             uncertainty_box_offsets = (box_corners *
-                                       (self.orbit.dra.value, self.orbit.ddec.value) *
+                                       (3*max(min_dra, self.orbit.dra.value), 3*max(min_ddec, self.orbit.ddec.value)) *
                                        (self.orbit.dra.unit, self.orbit.ddec.unit)).T
             bb = self.orbit.coordinate.spherical_offsets_by(uncertainty_box_offsets[0],
                                                             uncertainty_box_offsets[1])
+            previous_coord = self.orbit.coordinate
             _coords.extend(bb)
         self._coords = SkyCoord(_coords)
-        logging.info(f"{self._coords}")
+        logging.debug(f"{self._coords}")
         plt.plot(self._coords.ra.degree, self._coords.dec.degree, 's')
         return self._coords
 
@@ -155,4 +173,6 @@ class SearchBoundsGenerator(object):
         """
         Return a VOTable representation of the ephemeris.
         """
-        return TAPUploadVOTableFile(self.rows, self.field_definitions)
+        votable = TAPUploadVOTableFile(self.rows, self.field_definitions)
+        votable.to_xml('test.xml')
+        return votable

@@ -10,11 +10,11 @@ from tempfile import NamedTemporaryFile
 from astropy import wcs
 from astropy.table import Table, unique, vstack
 from astropy.time import Time
-from mp_ephem import BKOrbit
+from mp_ephem import BKOrbit, EphemerisReader
 from .cadc_archive_tap_client import CADCArchiveTapClient
 from .ephemeris_builder import SearchBoundsGenerator
 from .votable_file import TAPUploadVOTableFile
-
+from .ssois import SSOIS
 
 def get_orbit_from_ast_file(ast_file) -> BKOrbit:  # noqa: N802
     """
@@ -28,7 +28,7 @@ def get_orbit_from_ast_file(ast_file) -> BKOrbit:  # noqa: N802
 async def query_cadc_archive_against_votable(query: str,
                                              votable_file: TAPUploadVOTableFile,
                                              query_name='query',
-                                             chunk_size=320) -> Table:
+                                             chunk_size=20) -> Table:
     """
     Run QUERY against CADC ARCHIVE TAP service using the TAPUploadVOTableFile as the tmptable.
     :param query:
@@ -57,9 +57,9 @@ async def async_query_cadc_archive_against_votable(query: str, votable_file: TAP
     logging.info(f"Querying against votable of length: {len(votable_file)}")
     with NamedTemporaryFile(delete=False) as f:
         votable_file.to_xml(f)
+        start_of_query = time.time()
 
     with NamedTemporaryFile() as result:
-        start_of_query = time.time()
         logging.info(f"Starting query")
         await asyncio.to_thread(client.query,
                                 query=query,
@@ -94,14 +94,13 @@ def search_along_arc(votable_file: TAPUploadVOTableFile,
         "WHERE "
         "p.calibrationLevel = 2 "
         "AND INTERSECTS( arc.time_interval, p.time_bounds_samples ) = 1  "
-        "AND INTERSECTS( arc.pos_circle, p.position_bounds) = 1")
+        "AND INTERSECTS( arc.polygon, p.position_bounds) = 1")
     result = asyncio.run(query_cadc_archive_against_votable(
         _search_along_ephemeris_query.format(instrument, collection),
         votable_file, query_name='search_along_ephemeris'))
-    logging.debug(f"Found {len(result)} observation planes overlapping the ephemeris")
-    logging.debug(f"{result}")
     if len(result) > 0:
         result = unique(result, keys='planeID')
+    logging.info(f"Found {len(result)} observation planes overlapping the ephemeris")
     return result
 
 
@@ -174,7 +173,10 @@ def filter_for_artifacts_containing_arc(artifacts_wcs: Table, orbit: BKOrbit, db
                 result[-1] = True
         except Exception as e:
             logging.warning(f"Failed to build a wcs using {artifact_wcs}: {e}")
-    return artifacts_wcs[result]
+    if sum(result) > 0:
+        return unique(artifacts_wcs[result], keys=["Image", "Filter", "Image_Target", "EXTNAME"])
+    else:
+        return artifacts_wcs[result]
 
 
 ssois_column_names = ['Image', 'Filter', 'Image_Target',
@@ -208,7 +210,7 @@ def build_ssois_table(artifacts: Table, orbit: BKOrbit) -> Table:
     return Table(ssois_columns)
 
 
-def search(ast_file: str, start_date: Time, end_date: Time, observation_ids: list = None):
+def search(ast_file: str, start_date: Time, end_date: Time, observation_ids: list = None, use_ssois=False) -> Table:
     """
     Search the CADC archive for observations of a moving object in a time interval.
 
@@ -217,6 +219,9 @@ def search(ast_file: str, start_date: Time, end_date: Time, observation_ids: lis
     :param end_date:
     :return:
     """
+    if use_ssois:
+        ssois_search = SSOIS(EphemerisReader().read(ast_file))
+        return ssois_search(start_date, end_date)
     orbit = get_orbit_from_ast_file(ast_file)
     observations = search_along_arc(SearchBoundsGenerator(orbit, start_date, end_date).votable)
     logging.info(f"Found {len(observations)} possible observations, checking if on detector.")

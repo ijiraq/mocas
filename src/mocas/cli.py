@@ -31,6 +31,8 @@ def main():
     parser.add_argument('--delimiter', type=str, help='The output column delimiter', default='\t')
     parser.add_argument('--dblist', help="Text file containing list of observation ids of interest.",
                         default=None)
+    parser.add_argument('--ssois', help="Use the SSOIS service to find observations of the moving object.",
+                        action='store_true', default=False)
     parser.add_argument('--log-level', type=str, help='The log level to use',
                         default='ERROR',
                         choices=['DEBUG',
@@ -49,7 +51,7 @@ def main():
     if args.dblist is not None:
         observation_id_list = [observation_id.strip() for observation_id in open(args.dblist).readlines()]
 
-    result_table = search(ast_file, start_date, end_date, observation_id_list)
+    result_table = search(ast_file, start_date, end_date, observation_id_list, use_ssois=args.ssois)
     result_table.sort('MJD')
     result_table.write(args.output,
                        format='ascii',

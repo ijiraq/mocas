@@ -15,6 +15,7 @@ dependencies = [
     "astropy",
     "numpy",
     "mp_ephem",
+    "spherical_geometry",
     "cadcutils",
     "pyvo"
 ]
