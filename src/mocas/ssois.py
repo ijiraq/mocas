@@ -1,3 +1,5 @@
+import logging
+
 import requests
 from astropy.time import Time
 from astropy.table import Table
@@ -35,11 +37,12 @@ class SSOIS:
         self.params['epoch2'] = Time(end_date).isot
         response = requests.get(self.URL, params=self.params)
         response.raise_for_status()
+        logging.debug(f"{response.content}")
         ssois_table = Table.read(BytesIO(response.content),
                                  format='ascii.csv',
                                  delimiter='\t',
-                                 header_start=1,
-                                 data_start=2)
+                                 header_start=0,
+                                 data_start=1)
         ssois_table['dra'] = 0.00
         ssois_table['ddec'] = 0.00
         ssois_table['PA'] = 0.00
